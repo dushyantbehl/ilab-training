@@ -23,6 +23,37 @@ import numpy as np
 import torch
 
 
+def get_aimstack_run():
+    try:
+        from aim import Run
+
+        # Initialize a new run
+        aim_server = os.environ.get("AIMSTACK_SERVER")
+        aim_db = os.environ.get("AIMSTACK_DB")
+        aim_experiment = os.environ.get("AIMSTACK_EXPERIMENT")
+        if aim_experiment is None:
+            aim_experiment = ""
+
+        repo = ".aim"
+        if aim_server:
+            repo="aim://" + aim_server + "/"
+            aim_run = Run(
+                repo=repo, experiment=aim_experiment
+            )
+        if aim_db:
+            repo=aim_db
+            aim_run = Run(repo=repo, experiment=aim_experiment)
+        else:
+            aim_run = Run(experiment=aim_experiment)
+
+        print(f'\n\033[92mAim module logging to repo {repo}, with experiment name {aim_experiment}\033[0m\n')
+
+    except ModuleNotFoundError as e:
+        print(f'\n\n\t\t\033[91mERROR: Aim module needs to be installed before enabling aim\033[0m\n\n')
+        os._exit(1)
+
+    return aim_run
+
 def add_noisy_embeddings(model, noise_alpha=None):
     if not noise_alpha:
         return model

@@ -42,9 +42,9 @@ from instructlab.training.utils import (
     save_model_ds_native,
     set_random_seed,
     setup_logger,
+    get_aimstack_run
 )
 import instructlab.training.data_process as dp
-
 
 def get_ds_config(world_size, samples_per_gpu, grad_accum, opts: DeepSpeedOptions):
     ds_config = {
@@ -316,7 +316,7 @@ def maybe_resume_training(args, model):
     return model
 
 
-def train(args, model, tokenizer, train_loader, grad_accum):
+def train(args, model, tokenizer, train_loader, grad_accum, aim_run=None):
     model.train()
 
     global_step = 1
@@ -406,6 +406,23 @@ def train(args, model, tokenizer, train_loader, grad_accum):
                     f"total loss: {aggregated_values[2]/num_loss_counted_tokens}"
                 )
 
+                if args.global_rank == 0 and aim_run is not None:
+                    train_ctx = {"subset": "train"}
+
+                    aim_run.track(epoch, 'epoch counter', context=train_ctx)
+                    aim_run.track(global_step, 'step counter', context=train_ctx)
+                    aim_run.track(current_lr, name="learning rate", context=train_ctx)
+                    aim_run.track(aggregated_values[1].item(), "batch_size", context=train_ctx)
+
+                    aim_run.track(overall_throughput, name="throughput samples/s", context=train_ctx)
+                    aim_run.track(loss.item(), name="loss", context=train_ctx)
+                    aim_run.track(num_loss_counted_tokens.item(), 'num_loss_counted_tokens', context=train_ctx)
+                    total_loss = (aggregated_values[2]/num_loss_counted_tokens)
+                    aim_run.track(total_loss.item(), 'total loss', context=train_ctx)
+
+                    aim_run.track(cuda_mem_allocated, "cuda_mem_allocated (GB)", context=train_ctx)
+                    aim_run.track(cuda_malloc_retries, "cuda_malloc_retries", context=train_ctx)
+
             if global_step * batch_size % args.save_samples == 0:
                 save_hf_format_ds(
                     args,
@@ -477,6 +494,10 @@ def main(args):
         seed=args.seed,
     )
 
+    aim_run = None
+    if args.global_rank == 0 and args.enable_aim:
+        aim_run = get_aimstack_run()
+
     if args.local_rank == 0:
         print(
             f"\033[96mnum_gpus: {torch.distributed.get_world_size()}\n"
@@ -489,11 +510,19 @@ def main(args):
             f"avg_samples_per_batch: {len(dataset)/len(train_loader)}\n"
             f"samples_per_gpu: {args.samples_per_gpu}\033[0m"
         )
+    if args.global_rank == 0 and aim_run is not None:
+        aim_run['num_gpus'] = torch.distributed.get_world_size()
+        aim_run['avg_sample_len'] = dataset.get_lengths().mean()
+        aim_run['packing_max_batch_len'] = packing_max_batch_len
+        aim_run['grad_accum'] = grad_accum
+        aim_run['num batches'] = len(train_loader)
+        aim_run['avg_samples_per_batch'] = len(dataset)/len(train_loader)
+        aim_run['train_args'] = vars(args)
 
     model = setup_model(args, tokenizer, train_loader, grad_accum)
     model = maybe_resume_training(args, model)
 
-    train(args, model, tokenizer, train_loader, grad_accum)
+    train(args, model, tokenizer, train_loader, grad_accum, aim_run=aim_run)
 
     torch.distributed.barrier()
     torch.distributed.destroy_process_group()
@@ -642,6 +671,7 @@ if __name__ == "__main__":
         help="Offload optimizer to CPU when using DeepSpeed. This configures it to use ZeRO stage 2.",
     )
     parser.add_argument("--NEFTune_alpha", type=float, default=None)
+    parser.add_argument("--enable_aim", action='store_true')
     args = parser.parse_args()
     set_random_seed(args.seed)
     main(args)
@@ -688,5 +718,6 @@ torchrun --nnodes=$WORLD_SIZE --node_rank=$RANK \
 --sharding_strategy="HYBRID_SHARD" \
 --is_granite \
 --max_batch_len 70000 \
---seed=42
+--seed=42 \
+--enable_aim
 """
